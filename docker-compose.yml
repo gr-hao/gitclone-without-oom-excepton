@@ -1,0 +1,19 @@
+version: '3.4'
+
+services:
+  gitclone:
+    image: gitclone
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+    volumes:
+        - ./repos:/repos
+    deploy:
+        resources:
+          limits:
+            memory: 300M
+    environment:
+      - REPO_FOLDER=/repos
+      - MEMORY_LIMIT=300
+
+    #privileged: true
