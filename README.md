@@ -6,11 +6,11 @@ This is POC for how to clone git repositories concurrency without OOM exception.
 
 - **Using `git clone --filter=blob:none <repo-url>` instead of using go-git clone API**
 
-- **Clone dispatcher to manage clone concurrenncy**
+- **Clone dispatcher to manage clone concurrenncy**  
   By default app shall reserve 30 MiB of memory for each clone. Clone dispatcher (a module in this app) will try to get current free memory of the container to schedule next repository in the clone queue. All repositories need to be cloned must be go to clone-queue firstly, then clone dispatcher shall schedule clone depend on the current free memory. Clone dispatcher can schedule to clone multiple of repositories conccurency depend on the memory limit configured for the container.
 
 - **Re-push repo to clone-queue if clone failed**
-  For each clone failed (shall not generating OOM exception), clone dispatcher will re-push it to the end of clone-queue for retry later when memory become free enought.
+  For each clone failed (shall not generating OOM exception), clone dispatcher will re-push it to the end of clone-queue for retry later when memory become free enough.
 
 - **Variable guard-band memory**
 Each time a repository is failed to clone due to shortage of free memory, a guard-band memory is added more 30MiB (default value). The available memory now is recalculated by:  
