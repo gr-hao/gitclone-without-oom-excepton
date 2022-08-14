@@ -15,7 +15,7 @@ This is POC for how to clone git repositories concurrency without OOM exception.
 - **Variable guard-band memory**
   Each time a repository is failed to clone due to shortage of free memory, a guard-band memory is added more 30MiB (default value). The available memory now is recalculated by:
   > `available_memory := current_free_memory_of_container - guard_band_memory`.
-  > Now the clone-dispatcher shall based on new value "available_memory" to decide schedule more repositories for next clones. The more clones failed, the more increasing of guard-band memory. This machanism to protect the clone dispatcher from trying to schedule continuously repo to clone, and having too many repositories cloning at a time.
+  Now the clone-dispatcher shall based on new value "available_memory" to decide schedule more repositories for next clones. The more clones failed, the more increasing of guard-band memory. This machanism to protect the clone dispatcher from trying to schedule continuously repo to clone, and having too many repositories cloning at a time.
   > Reversely, when a repository has been cloned successfully, the guard-band memory is substracted by 30MiB to encourage another repository has to a change to clone from the clone-queue.
 
 # How to run a test
@@ -37,7 +37,7 @@ This is POC for how to clone git repositories concurrency without OOM exception.
   Add more repo URLs to below slice to clone more repositories.
 
 ```
-repoUrls := []string{
+	repoUrls := []string{
 		"https://github.com/microsoft/vscode.git",
 		"https://github.com/microsoft/vscode.git",
 		"https://github.com/googleapis/googleapis.git",
@@ -54,3 +54,5 @@ repoUrls := []string{
 		"https://github.com/torvalds/linux.git",
 	}
 ```
+- ## Start the test  
+`docker-compose up --build`
