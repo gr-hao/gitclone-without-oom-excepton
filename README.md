@@ -18,7 +18,13 @@ Each time a repository is failed to clone due to shortage of free memory, a guar
 Now the clone-dispatcher shall based on new value "available_memory" to decide schedule more repositories for next clones. The more clones failed, the more increasing of guard-band memory. This machanism to protect the clone dispatcher from trying to schedule continuously repo to clone, and having too many repositories cloning at a time.
 Reversely, when a repository has been cloned successfully, the guard-band memory is substracted by 30MiB to encourage another repository has to a change to clone from the clone-queue.
 
-<img src="[/path/to/img.jpg](https://github.com/gr-hao/gitclone-without-oom-excepton/blob/19cfc0be74a1ad229dd6bae00d5eb14457d6f1fe/diagram.png)" alt="" title="">
+<p align="center">
+<img 
+     src="https://github.com/gr-hao/gitclone-without-oom-excepton/blob/19cfc0be74a1ad229dd6bae00d5eb14457d6f1fe/diagram.png" 
+     alt="" 
+     title=""
+     style="display: inline-block; margin: 0 auto; width: 550px">
+</p> 
 
 # How to run a test
 
