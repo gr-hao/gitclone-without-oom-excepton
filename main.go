@@ -47,7 +47,7 @@ func printMemUsage() {
 func main() {
 	fmt.Println("Start to git test")
 
-	repoUrls := []string{
+	/* repoUrls := []string{
 		"https://github.com/microsoft/vscode.git",
 		"https://github.com/microsoft/vscode.git",
 		"https://github.com/googleapis/googleapis.git",
@@ -61,6 +61,15 @@ func main() {
 		"https://github.com/gcc-mirror/gcc.git",
 		"https://github.com/googleapis/googleapis.git",
 		"https://github.com/aosp-mirror/platform_development.git",
+		"https://github.com/torvalds/linux.git",
+	} */
+
+	repoUrls := []string{
+		"https://github.com/microsoft/vscode.git",
+		"https://github.com/microsoft/vscode.git",
+		"https://github.com/torvalds/linux.git",
+		"https://github.com/microsoft/vscode.git",
+		"https://github.com/microsoft/vscode.git",
 		"https://github.com/torvalds/linux.git",
 	}
 

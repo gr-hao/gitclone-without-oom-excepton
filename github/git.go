@@ -44,7 +44,7 @@ type Repo struct {
 	RepoDirPath         string
 	RemoteBranches      []string
 	freeMemmoryAtStart  uint64
-	minMemmoryRequires  uint64
+	minMemmoryRequired  uint64
 	freeMemmoryAtFailed uint64
 	failureCount        uint64
 	cloneType           string
@@ -170,32 +170,38 @@ func (g *Git) GitDispatcher() {
 			fmt.Printf("cloned success: %d, queue: %d, clonings: %d,  MemUsed=%d Mi\n", cloneSuccess, len(g.repoQueue), g.beingClones, used)
 
 			if len(g.repoQueue) == 0 {
-				g.memGuard = 0
 				continue
 			}
+
+			g.lock.RLock()
+			if len(g.repoQueue) <= 1 && g.beingClones == 0 {
+				g.memGuard = 0
+				g.totalMemoryConsuming = 0
+			}
+			g.lock.RUnlock()
 
 			i := 0
 			var repo *Repo
 
 			for _, repo = range g.repoQueue {
-				if repo.failureCount >= 5 {
+				if repo.failureCount >= 5 && len(g.repoQueue) > 1 {
 					continue
 				}
 
 				g.lock.RLock()
-				totalNextMemUsing := g.totalMemoryConsuming + repo.minMemmoryRequires
+				totalNextMemUsing := g.totalMemoryConsuming + repo.minMemmoryRequired
 				g.lock.RUnlock()
 
 				available := g.ramCofigured - g.memGuard
 
-				// fmt.Printf("totalMemoryConsuming: %d, minMemmoryRequires: %d, available: %d\n",
+				// fmt.Printf("totalMemoryConsuming: %d, minMemmoryRequired: %d, available: %d\n",
 				// 	g.totalMemoryConsuming,
-				// 	repo.minMemmoryRequires,
+				// 	repo.minMemmoryRequired,
 				// 	available)
 
-				if totalNextMemUsing <= available && free >= repo.minMemmoryRequires {
+				if totalNextMemUsing <= available && free >= repo.minMemmoryRequired {
 					g.lock.Lock()
-					g.totalMemoryConsuming += repo.minMemmoryRequires
+					g.totalMemoryConsuming += repo.minMemmoryRequired
 					g.beingClones += 1
 					g.lock.Unlock()
 
@@ -212,7 +218,7 @@ func (g *Git) GitDispatcher() {
 						}
 
 						g.lock.Lock()
-						g.totalMemoryConsuming -= repo.minMemmoryRequires
+						g.totalMemoryConsuming -= repo.minMemmoryRequired
 						g.beingClones -= 1
 						if g.beingClones < 0 {
 							g.beingClones = 0
@@ -220,22 +226,37 @@ func (g *Git) GitDispatcher() {
 						g.lock.Unlock()
 
 						if err != nil {
-							g.memGuard += repo.minMemmoryRequires
+							fmt.Printf("Failed to clone '%s', requeue!\n", repo.RepoUrl)
 							repo.failureCount++
 							repo.freeMemmoryAtFailed, _ = g.GetFreeUsage()
-							fmt.Printf("Failed to clone '%s', requeue!\n", repo.RepoUrl)
+
+							estimateUsage := int(repo.freeMemmoryAtStart) - int(repo.freeMemmoryAtFailed)
+							fmt.Printf("----------------- estimateUsage = %d\n", estimateUsage)
+
+							if estimateUsage*int(repo.failureCount) > int(repo.minMemmoryRequired) {
+								repo.minMemmoryRequired = uint64(estimateUsage)
+							}
+							repo.minMemmoryRequired *= repo.failureCount
+
+							g.lock.Lock()
+							g.memGuard += repo.minMemmoryRequired
+							g.lock.Unlock()
+
 							g.queue <- repo
 						} else {
-							if g.memGuard >= repo.minMemmoryRequires {
-								g.memGuard -= repo.minMemmoryRequires
+							g.lock.Lock()
+							if g.memGuard >= repo.minMemmoryRequired {
+								g.memGuard -= repo.minMemmoryRequired
 							}
+							g.lock.Unlock()
+
+							repo.failureCount = 0
+							repo.minMemmoryRequired = g.minMemoryForEachClone
 							success <- 1
 							fmt.Printf("=== Clone '%s' successfully ===\n", repo.RepoUrl)
 						}
 					}(repo)
 					i++
-				} else {
-					break
 				}
 			}
 			g.repoQueue = g.repoQueue[i:]
@@ -265,7 +286,7 @@ func (g *Git) FullClone(RepoUrl string) {
 	repo := Repo{
 		RepoUrl:            RepoUrl,
 		cloneType:          "full",
-		minMemmoryRequires: g.minMemoryForEachClone,
+		minMemmoryRequired: g.minMemoryForEachClone,
 	}
 	g.queue <- &repo
 }
@@ -274,7 +295,7 @@ func (g *Git) BloblessClone(RepoUrl string) {
 	repo := Repo{
 		RepoUrl:            RepoUrl,
 		cloneType:          "blobless",
-		minMemmoryRequires: g.minMemoryForEachClone,
+		minMemmoryRequired: g.minMemoryForEachClone,
 	}
 	g.queue <- &repo
 }
