@@ -11,7 +11,7 @@ FROM alpine:latest
 RUN apk --no-cache add ca-certificates
 RUN apk update
 RUN apk add bash git
-
 COPY --from=builder /go/bin/app /app
 ENTRYPOINT /app
 LABEL Name=gitclone Version=0.0.1
+EXPOSE 3000

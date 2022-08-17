@@ -129,8 +129,10 @@ type Git struct {
 func NewGit() *Git {
 	repoFolder := os.Getenv("REPO_FOLDER")
 	if repoFolder == "" {
+		fmt.Println("REPO_FOLDER has not set, use local ./repos!")
 		repoFolder = "./repos"
 	}
+
 	g := Git{
 		repoFolder: repoFolder,
 		repoQueue:  []*Repo{},
@@ -143,7 +145,7 @@ func NewGit() *Git {
 
 	x, _ := strconv.ParseInt(ramCofigured, 10, 64)
 	if x == 0 {
-		g.ramCofigured = 160
+		g.ramCofigured = 300
 	} else {
 		g.ramCofigured = uint64(x)
 	}
@@ -163,7 +165,7 @@ func (g *Git) GitDispatcher() {
 			g.repoQueue = append(g.repoQueue, repo)
 		case <-time.After(time.Second):
 			free, used := g.GetFreeUsage()
-			fmt.Printf("cloned success: %d, queue: %d, clonings: %d,  MemUsed=%d Mi\n", cloneSuccess, len(g.repoQueue), g.beingClones, used)
+			fmt.Printf("cloned success: %d, queue: %d, clonings: %d,  MemUsed=%d Mi/%d Mi\n", cloneSuccess, len(g.repoQueue), g.beingClones, used, g.ramCofigured)
 
 			if len(g.repoQueue) == 0 {
 				continue
@@ -211,7 +213,7 @@ func (g *Git) GitDispatcher() {
 					continue
 				}
 
-				if totalNextMemUsing <= available && free >= repo.memmoryRequired {
+				if (totalNextMemUsing <= available && free >= repo.memmoryRequired) || (g.beingClones == 0) {
 					fmt.Printf("totalNextMemUsing: %d, available: %d, free: %d, memmoryRequired: %d\n", totalNextMemUsing, available, free, repo.memmoryRequired)
 
 					g.lock.Lock()
@@ -371,7 +373,7 @@ func (g *Git) doFullClone(repo *Repo) error {
 }
 
 func (g *Git) doBloblessClone(repo *Repo, debug bool) error {
-	repo.RepoDirPath = fmt.Sprintf("%s/%s", g.repoFolder, randStr(8))
+	repo.RepoDirPath = fmt.Sprintf("%s/gitclone-%s", g.repoFolder, randStr(8))
 
 	cmd := fmt.Sprintf("git clone --filter=blob:none %s %s", repo.RepoUrl, repo.RepoDirPath)
 	//cmd := fmt.Sprintf("git clone --filter=tree:0 %s %s", repo.RepoUrl, repo.RepoDirPath)

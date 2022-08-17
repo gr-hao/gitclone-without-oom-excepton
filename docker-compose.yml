@@ -2,10 +2,10 @@ version: '3.4'
 
 services:
   gitclone:
-    image: gitclone
+    image: guardrails/gitcloneoom:test
     build:
       context: .
-      dockerfile: ./Dockerfile
+      dockerfile: ./Dockerfile.debug
     volumes:
         - ./repos:/repos
     deploy:

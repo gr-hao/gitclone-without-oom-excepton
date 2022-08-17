@@ -37,6 +37,11 @@ func main() {
 		"https://github.com/torvalds/linux.git",
 	} */
 
+	/* repoUrls := []string{
+		"https://github.com/torvalds/linux.git",
+		"https://github.com/microsoft/vscode.git",
+	} */
+
 	g := github.NewGit()
 	_ = g
 
@@ -48,6 +53,8 @@ func main() {
 	// This app will manage to clone repositories concurency
 	// as much as possible without OOM exception.
 	for _, r := range repoUrls {
+		//g.BloblessClone("https://github.com/googleapis/googleapis.git")
+		//break
 		g.BloblessClone(r)
 	}
 

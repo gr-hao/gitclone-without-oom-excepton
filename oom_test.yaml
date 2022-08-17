@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hao-oom-test
+  namespace: guardrailsio
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hao-oom-test
+  template:
+    metadata:
+      labels:
+        app: hao-oom-test
+    spec:
+      containers:
+        - name: gitcloneoom
+          image: guardrails/gitcloneoom:test
+
+          # Force alway pull image from dockerhub -> for debug only
+          imagePullPolicy: Always
+
+          env:
+            - name: MEMORY_LIMIT
+              value: "200"
+
+            - name: REPO_FOLDER
+              value: "/repos"
+
+          volumeMounts:
+            - name: host-mount
+              mountPath: /repos
+
+          resources:
+            limits:
+              cpu: 1000m
+              memory: 200Mi
+            requests:
+              cpu: 300m
+              memory: 200Mi
+      volumes:
+        - name: host-mount
+          hostPath:
+            path: /pv-disks/nvme
+
+      dnsPolicy: ClusterFirst
+      imagePullSecrets:
+        - name: docker-regcred
