@@ -11,9 +11,11 @@ services:
     deploy:
         resources:
           limits:
-            memory: 300M
+            memory: 200M
     environment:
       - REPO_FOLDER=/repos
-      - MEMORY_LIMIT=300
+      - MEMORY_LIMIT=200
+    ports:
+      - 6060:6060
 
     #privileged: true

@@ -20,6 +20,10 @@ import (
 	"github.com/shirou/gopsutil/mem"
 )
 
+var (
+	RepoSize map[string]uint64 = map[string]uint64{}
+)
+
 func init() {
 	rand.Seed(time.Now().UnixNano())
 }
@@ -45,6 +49,7 @@ func shellRun(command string) (error, string, string) {
 
 type Repo struct {
 	RepoUrl             string
+	RepoName            string
 	RepoDirPath         string
 	RemoteBranches      []string
 	freeMemmoryAtStart  uint64
@@ -54,6 +59,7 @@ type Repo struct {
 	failureCount        uint64
 	cloneType           string
 	repo                *git.Repository
+	worktree            *git.Worktree
 }
 
 func (r *Repo) getRemoteBranches() ([]string, error) {
@@ -66,6 +72,14 @@ func (r *Repo) getRemoteBranches() ([]string, error) {
 			return nil, err
 		}
 	}
+
+	r.worktree, err = r.repo.Worktree()
+	if err != nil {
+		fmt.Println("Build WorkTree failed!", err)
+		return nil, err
+	}
+
+	fmt.Println("Build WorkTree successfully!", r.RepoUrl)
 
 	remote, err := r.repo.Remote("origin")
 	if err != nil {
@@ -154,18 +168,32 @@ func NewGit() *Git {
 	return &g
 }
 
+func (g *Git) GitRepoNums() int {
+	g.lock.RLock()
+	defer g.lock.RUnlock()
+	return g.beingClones + len(g.repoQueue)
+}
+
 func (g *Git) GitDispatcher() {
 	cloneSuccess := 0
 	success := make(chan int)
+	var cloningMap sync.Map
 	for {
 		select {
 		case x := <-success:
 			cloneSuccess += x
 		case repo := <-g.queue:
 			g.repoQueue = append(g.repoQueue, repo)
-		case <-time.After(time.Second):
+		case <-time.After(2 * time.Second):
 			free, used := g.GetFreeUsage()
 			fmt.Printf("cloned success: %d, queue: %d, clonings: %d,  MemUsed=%d Mi/%d Mi\n", cloneSuccess, len(g.repoQueue), g.beingClones, used, g.ramCofigured)
+
+			fmt.Printf("%d Clonings: [\n", g.beingClones)
+			cloningMap.Range(func(k any, v any) bool {
+				fmt.Printf("\t%v --> Require %v (MiB)\n", k, v)
+				return true
+			})
+			fmt.Printf("]\n")
 
 			if len(g.repoQueue) == 0 {
 				continue
@@ -226,12 +254,17 @@ func (g *Git) GitDispatcher() {
 					go func(repo *Repo) {
 						var err error
 						fmt.Printf("Start clone '%s' ...\n", repo.RepoUrl)
+						repo.RepoDirPath = fmt.Sprintf("%s/gitclone-%s", g.repoFolder, randStr(8))
+
+						cloningMap.Store(repo.RepoDirPath+"/"+repo.RepoName, repo.memmoryRequired)
 
 						if repo.cloneType == "blobless" {
 							err = g.doBloblessClone(repo, true)
 						} else {
 							err = g.doFullClone(repo)
 						}
+
+						cloningMap.Delete(repo.RepoDirPath + "/" + repo.RepoName)
 
 						g.lock.Lock()
 						g.totalMemoryConsuming -= repo.memmoryRequired
@@ -313,10 +346,14 @@ func (g *Git) BloblessClone(RepoUrl string) {
 		120: {500, 1024},
 		150: {1024, 2048},
 		250: {2048, 1024 * 4},
+		//90: {2048, 1024 * 4},
 	}
 	minMemoryForEachClone := uint64(200)
 
-	repoSize := g.getRepoSize(RepoUrl)
+	repoSize, rname := g.getRepoSize(RepoUrl)
+	if repoSize == 0 {
+		return
+	}
 	for s, r := range sizeMemMap {
 		if r[0] <= repoSize && repoSize < r[1] {
 			minMemoryForEachClone = s
@@ -326,6 +363,7 @@ func (g *Git) BloblessClone(RepoUrl string) {
 
 	repo := Repo{
 		RepoUrl:            RepoUrl,
+		RepoName:           rname,
 		cloneType:          "blobless",
 		memmoryRequired:    minMemoryForEachClone,
 		minMemmoryRequired: minMemoryForEachClone,
@@ -373,9 +411,7 @@ func (g *Git) doFullClone(repo *Repo) error {
 }
 
 func (g *Git) doBloblessClone(repo *Repo, debug bool) error {
-	repo.RepoDirPath = fmt.Sprintf("%s/gitclone-%s", g.repoFolder, randStr(8))
-
-	cmd := fmt.Sprintf("git clone --filter=blob:none %s %s", repo.RepoUrl, repo.RepoDirPath)
+	cmd := fmt.Sprintf("git clone --jobs=1 --filter=blob:none %s %s", repo.RepoUrl, repo.RepoDirPath)
 	//cmd := fmt.Sprintf("git clone --filter=tree:0 %s %s", repo.RepoUrl, repo.RepoDirPath)
 	fmt.Printf("Runing: %s\n", cmd)
 
@@ -394,35 +430,46 @@ func (g *Git) doBloblessClone(repo *Repo, debug bool) error {
 		}
 	}
 	_, err = repo.getRemoteBranches()
+
+	// Remove folder
+	cmd = fmt.Sprintf("rm -rf %s", repo.RepoDirPath)
+	shellRun(cmd)
 	return err
 }
 
-func (g *Git) getRepoSize(repoUrl string) uint64 {
+func (g *Git) getRepoSize(repoUrl string) (uint64, string) {
 	s := strings.Split(repoUrl, "github.com/")
 	if len(s) <= 1 {
-		return 0
+		return 0, ""
 	}
 
-	r := strings.ReplaceAll(s[1], ".git", "")
-	url := "https://api.github.com/repos/" + r
+	rname := strings.ReplaceAll(s[1], ".git", "")
+	//url := "https://api.github.com/repos/" + r
+	url := fmt.Sprintf("https://gr-hao:xxx@api.github.com/repos/%s", rname)
+
+	x, ok := RepoSize[repoUrl]
+	if ok {
+		return x, rname
+	}
 
 	resp, err := http.Get(url)
 	if err != nil {
-		return 0
+		return 0, ""
 	}
 
 	defer resp.Body.Close()
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		return 0
+		return 0, ""
 	}
 
 	var j map[string]interface{}
 	err = json.Unmarshal(body, &j)
 	if err != nil {
-		return 0
+		return 0, ""
 	}
 
 	size := uint64(j["size"].(float64) / 1024)
-	return size
+	RepoSize[repoUrl] = size
+	return size, rname
 }
