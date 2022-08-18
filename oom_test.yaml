@@ -22,7 +22,10 @@ spec:
 
           env:
             - name: MEMORY_LIMIT
-              value: "300"
+              value: "500"
+
+            - name: MEMORY_GUARD
+              value: "100"
 
             - name: REPO_FOLDER
               value: "/repos"
@@ -34,10 +37,10 @@ spec:
           resources:
             limits:
               cpu: 1000m
-              memory: 300Mi
+              memory: 500Mi
             requests:
               cpu: 300m
-              memory: 300Mi
+              memory: 500Mi
       volumes:
         - name: host-mount
           hostPath:

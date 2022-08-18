@@ -15,6 +15,7 @@ services:
     environment:
       - REPO_FOLDER=/repos
       - MEMORY_LIMIT=200
+      - MEMORY_GUARD=60
     ports:
       - 6060:6060
 
