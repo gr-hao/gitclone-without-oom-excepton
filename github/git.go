@@ -22,7 +22,16 @@ import (
 )
 
 var (
-	RepoSize map[string]int = map[string]int{}
+	RepoSize   map[string]int = map[string]int{}
+	sizeMemMap                = map[int][]int{
+		20:  {0, 100},
+		40:  {100, 300},
+		60:  {300, 500},
+		70:  {500, 1024},
+		180: {1024, 2048},
+		250: {2048, 1024 * 4},
+		//90: {2048, 1024 * 4},
+	}
 )
 
 func init() {
@@ -179,6 +188,10 @@ func NewGit() *Git {
 		g.ramCofigured = int(x)
 	}
 	fmt.Printf("MEMORY_LIMIT: %d\n", g.ramCofigured)
+
+	cmd := fmt.Sprintf("rm -rf %s/gitclone*", repoFolder)
+	shellRun2(cmd)
+
 	go g.GitDispatcher()
 	return &g
 }
@@ -312,10 +325,7 @@ func (g *Git) GitDispatcher() {
 				return false
 			})
 
-			i := 0
-			var repo *Repo
-
-			for _, repo = range g.repoQueue {
+			for i, repo := range g.repoQueue {
 				g.lock.Lock()
 				totalNextMemUsing := 0
 				if len(g.clonningQueue) == 0 {
@@ -345,13 +355,12 @@ func (g *Git) GitDispatcher() {
 					g.totalMemoryConsuming += repo.memmoryRequired
 					g.lock.Unlock()
 
+					g.repoQueue = append(g.repoQueue[0:i], g.repoQueue[i+1:]...)
 					go g.clone(repo)
 					clonnings++
-					i++
-					break
+					break // Do not remove this line
 				}
 			}
-			g.repoQueue = g.repoQueue[i:]
 		}
 	}
 }
@@ -432,15 +441,6 @@ func (g *Git) FullClone(RepoUrl string) {
 }
 
 func (g *Git) BloblessClone(RepoUrl string) {
-	sizeMemMap := map[int][]int{
-		20:  {0, 100},
-		40:  {100, 300},
-		70:  {300, 500},
-		100: {500, 1024},
-		180: {1024, 2048},
-		250: {2048, 1024 * 4},
-		//90: {2048, 1024 * 4},
-	}
 	minMemoryForEachClone := 300
 
 	repoSize, rname := g.getRepoSize(RepoUrl)
