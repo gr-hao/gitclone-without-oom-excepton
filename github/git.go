@@ -256,12 +256,17 @@ func (g *Git) GitDispatcher() {
 				return false
 			})
 
+			kill := true
 			if used+guard > g.ramCofigured && len(g.clonningQueue) >= 1 {
 				pressureTime = true
 				for _, r := range g.clonningQueue {
 					if r.cloneStatus != "stoped" && r.cmd != nil && r.cmd.Process != nil {
 						fmt.Printf("\n\n\n\n****** Stop cloning %s/%s ******\n\n\n\n", r.RepoDirPath, r.RepoName)
-						r.cmd.Process.Signal(syscall.SIGSTOP)
+						if !kill {
+							r.cmd.Process.Signal(syscall.SIGSTOP)
+						} else {
+							syscall.Kill(-r.cmd.Process.Pid, syscall.SIGKILL)
+						}
 						r.cloneStatus = "stoped"
 
 						/* id, err := syscall.Getpgid(r.cmd.Process.Pid)
@@ -285,15 +290,17 @@ func (g *Git) GitDispatcher() {
 				pressureTime = false
 			}
 
-			if g.ramCofigured-used > int(float64(guard)*1.4) {
-				// Restart stopping-clone when have enough mem
-				for i := len(g.clonningQueue) - 1; i >= 0; i-- {
-					r := g.clonningQueue[i]
-					if r.cloneStatus == "stoped" {
-						r.cloneStatus = "cloning"
-						fmt.Printf("\n\n\n\n****** Restart cloning %s/%s ******\n\n\n\n", r.RepoDirPath, r.RepoName)
-						r.cmd.Process.Signal(syscall.SIGCONT)
-						break
+			if !kill {
+				if g.ramCofigured-used > int(float64(guard)*1.4) {
+					// Restart stopping-clone when have enough mem
+					for i := len(g.clonningQueue) - 1; i >= 0; i-- {
+						r := g.clonningQueue[i]
+						if r.cloneStatus == "stoped" {
+							r.cloneStatus = "cloning"
+							fmt.Printf("\n\n\n\n****** Restart cloning %s/%s ******\n\n\n\n", r.RepoDirPath, r.RepoName)
+							r.cmd.Process.Signal(syscall.SIGCONT)
+							break
+						}
 					}
 				}
 			}
@@ -393,7 +400,9 @@ func (g *Git) clone(repo *Repo) {
 			if g.memGuard > repo.memmoryRequired {
 				g.memGuard -= repo.memmoryRequired
 			}
-			repo.memmoryRequired *= (2 << repo.failureCount)
+			//repo.memmoryRequired *= (2 << repo.failureCount)
+			x := float64(repo.memmoryRequired) * 1.13
+			repo.memmoryRequired = int(x)
 			fmt.Printf("----------------- memmoryRequired = %d\n", repo.memmoryRequired)
 
 			g.memGuard += repo.memmoryRequired

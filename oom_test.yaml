@@ -22,7 +22,7 @@ spec:
 
           env:
             - name: MEMORY_LIMIT
-              value: "500"
+              value: "600"
 
             - name: MEMORY_GUARD
               value: "100"
@@ -37,10 +37,10 @@ spec:
           resources:
             limits:
               cpu: 1000m
-              memory: 500Mi
+              memory: 600Mi
             requests:
               cpu: 300m
-              memory: 500Mi
+              memory: 600Mi
       volumes:
         - name: host-mount
           hostPath:
