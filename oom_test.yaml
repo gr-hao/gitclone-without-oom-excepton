@@ -22,7 +22,7 @@ spec:
 
           env:
             - name: MEMORY_LIMIT
-              value: "600"
+              value: "1024"
 
             - name: MEMORY_GUARD
               value: "100"
@@ -37,10 +37,12 @@ spec:
           resources:
             limits:
               cpu: 1000m
-              memory: 600Mi
+              memory: 1024Mi
+              ephemeral-storage: "12Gi"
             requests:
               cpu: 300m
-              memory: 600Mi
+              memory: 1024Mi
+              ephemeral-storage: "10Gi"
       volumes:
         - name: host-mount
           hostPath:
