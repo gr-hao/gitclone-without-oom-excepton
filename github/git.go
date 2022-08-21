@@ -1,11 +1,9 @@
 package github
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
-	"math/rand"
 	"net/http"
 	"os"
 	"os/exec"
@@ -17,49 +15,46 @@ import (
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/mackerelio/go-osstat/memory"
 	"github.com/shirou/gopsutil/mem"
 )
 
 var (
-	RepoSize map[string]uint64 = map[string]uint64{}
+	RepoSize   map[string]int = map[string]int{}
+	sizeMemMap                = map[int][]int{
+		20:  {0, 100},
+		40:  {100, 300},
+		60:  {300, 500},
+		70:  {500, 1024},
+		100: {1024, 2048},
+		140: {2048, 1024 * 3},
+		180: {1024 * 3, 1024 * 4},
+		250: {1024 * 4, 1024 * 5},
+	}
 )
 
-func init() {
-	rand.Seed(time.Now().UnixNano())
-}
-
-func randStr(n int) string {
-	letterRunes := []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
-	b := make([]rune, n)
-	for i := range b {
-		b[i] = letterRunes[rand.Intn(len(letterRunes))]
-	}
-	return string(b)
-}
-
-func shellRun(command string) (error, string, string) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd := exec.Command("sh", "-c", command)
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	return err, stdout.String(), stderr.String()
-}
+const (
+	QUEUED   = "queued"
+	CLONING  = "cloning"
+	STOPED   = "stoped"
+	FINISHED = "finised"
+)
 
 type Repo struct {
-	RepoUrl             string
-	RepoName            string
-	RepoDirPath         string
-	RemoteBranches      []string
-	freeMemmoryAtStart  uint64
-	freeMemmoryAtFailed uint64
-	minMemmoryRequired  uint64
-	memmoryRequired     uint64
-	failureCount        uint64
-	cloneType           string
-	repo                *git.Repository
-	worktree            *git.Worktree
+	RepoUrl            string
+	cloneType          string
+	RepoName           string
+	RepoDirPath        string
+	RemoteBranches     []string
+	minMemmoryRequired int
+	memmoryRequired    int
+	failureCount       int
+	cloneAt            int64
+	repo               *git.Repository
+	worktree           *git.Worktree
+	cmd                *exec.Cmd
+	cloneStatus        string
+	err                error
 }
 
 func (r *Repo) getRemoteBranches() ([]string, error) {
@@ -129,14 +124,21 @@ func (r *Repo) Checkout(url, branch, commit, dest string) error {
 
 type Git struct {
 	repoFolder            string
-	repoQueue             []*Repo
-	queue                 chan *Repo
-	ramAtStart            uint64
-	ramCofigured          uint64
-	minMemoryForEachClone uint64
-	totalMemoryConsuming  uint64
-	memGuard              uint64
-	beingClones           int
+	ramAtStart2           uint64
+	ramAtStart1           uint64
+	ramCofigured          int
+	minMemoryForEachClone int
+	totalMemoryConsuming  int
+	protectionGuard       int
+	memGuard              int
+	readyQueueChan        chan *Repo
+	runningQueueChan      chan *Repo
+	pressureTimeChan      chan bool
+	successChan           chan int
+	readyRepoQueue        []*Repo
+	repoClonings          []*Repo
+	cloneSuccess          uint64
+	pressureTime          bool
 	lock                  sync.RWMutex
 }
 
@@ -148,22 +150,33 @@ func NewGit() *Git {
 	}
 
 	g := Git{
-		repoFolder: repoFolder,
-		repoQueue:  []*Repo{},
-		queue:      make(chan *Repo),
+		repoFolder:     repoFolder,
+		readyRepoQueue: []*Repo{},
+		readyQueueChan: make(chan *Repo, 5),
 	}
 
-	g.ramAtStart = 0
 	g.minMemoryForEachClone = 30
 	ramCofigured := os.Getenv("MEMORY_LIMIT")
 
 	x, _ := strconv.ParseInt(ramCofigured, 10, 64)
 	if x == 0 {
-		g.ramCofigured = 300
+		g.ramCofigured = 80
 	} else {
-		g.ramCofigured = uint64(x)
+		g.ramCofigured = int(x)
 	}
 	fmt.Printf("MEMORY_LIMIT: %d\n", g.ramCofigured)
+
+	g.protectionGuard = 70
+	mg := os.Getenv("MEMORY_GUARD")
+	x, _ = strconv.ParseInt(mg, 10, 64)
+	if x > 0 {
+		g.protectionGuard = int(x)
+	}
+	fmt.Printf("MEMORY_PROTECTION_GUARD: %d\n", g.protectionGuard)
+
+	cmd := fmt.Sprintf("rm -rf %s/gitclone*", repoFolder)
+	ShellRun(cmd, nil)
+
 	go g.GitDispatcher()
 	return &g
 }
@@ -171,161 +184,201 @@ func NewGit() *Git {
 func (g *Git) GitRepoNums() int {
 	g.lock.RLock()
 	defer g.lock.RUnlock()
-	return g.beingClones + len(g.repoQueue)
+	return len(g.repoClonings) + len(g.readyRepoQueue)
+}
+
+func (g *Git) CloningNum() int {
+	g.lock.RLock()
+	defer g.lock.RUnlock()
+	return len(g.repoClonings)
+}
+func (g *Git) WaitingNum() int {
+	g.lock.RLock()
+	defer g.lock.RUnlock()
+	return len(g.readyRepoQueue)
 }
 
 func (g *Git) GitDispatcher() {
-	cloneSuccess := 0
-	success := make(chan int)
-	var cloningMap sync.Map
+	g.successChan = make(chan int, 5)
+	g.runningQueueChan = make(chan *Repo, 5)
+	g.pressureTimeChan = make(chan bool)
+	g.cloneSuccess = 0
+	g.pressureTime = false
+
 	for {
 		select {
-		case x := <-success:
-			cloneSuccess += x
-		case repo := <-g.queue:
-			g.repoQueue = append(g.repoQueue, repo)
-		case <-time.After(2 * time.Second):
-			free, used := g.GetFreeUsage()
-			fmt.Printf("cloned success: %d, queue: %d, clonings: %d,  MemUsed=%d Mi/%d Mi\n", cloneSuccess, len(g.repoQueue), g.beingClones, used, g.ramCofigured)
-
-			fmt.Printf("%d Clonings: [\n", g.beingClones)
-			cloningMap.Range(func(k any, v any) bool {
-				fmt.Printf("\t%v --> Require %v (MiB)\n", k, v)
-				return true
-			})
-			fmt.Printf("]\n")
-
-			if len(g.repoQueue) == 0 {
-				continue
+		case x := <-g.successChan:
+			g.cloneSuccess += uint64(x)
+		case p := <-g.pressureTimeChan:
+			g.pressureTime = p
+		case repo := <-g.readyQueueChan:
+			repo.cloneStatus = QUEUED
+			g.readyRepoQueue = append(g.readyRepoQueue, repo)
+		case repo := <-g.runningQueueChan:
+			if repo.cloneStatus == FINISHED {
+				for i, r := range g.repoClonings {
+					if r.RepoDirPath == repo.RepoDirPath && repo.cmd == nil {
+						fmt.Printf("*** Repo %s stoped cloning!\n", r.RepoName)
+						g.repoClonings = append(g.repoClonings[0:i], g.repoClonings[i+1:]...)
+						break
+					}
+				}
+				g.cloneFinished(repo)
+			} else if repo.cloneStatus == CLONING {
+				g.repoClonings = append(g.repoClonings, repo)
 			}
-
-			g.lock.RLock()
-			if len(g.repoQueue) <= 1 && g.beingClones == 0 {
-				g.memGuard = 0
-				g.totalMemoryConsuming = 0
-			}
-			g.lock.RUnlock()
-
-			i := 0
-			var repo *Repo
-
-			// Repo with small required-mem is higher priority to run fist
-			// Should be optimized with order queue.
-			sort.Slice(g.repoQueue, func(i, j int) bool {
-				if g.repoQueue[i].memmoryRequired < g.repoQueue[j].memmoryRequired {
-					return true
-				}
-				return false
-			})
-
-			for _, repo = range g.repoQueue {
-				totalNextMemUsing := uint64(0)
-
-				g.lock.RLock()
-				if g.beingClones == 0 {
-					g.memGuard = 0
-					g.totalMemoryConsuming = 0
-					repo.failureCount = 0
-					repo.memmoryRequired = repo.minMemmoryRequired
-				} else {
-					totalNextMemUsing = g.totalMemoryConsuming + repo.memmoryRequired
-				}
-
-				available := uint64(0)
-				if g.ramCofigured > g.memGuard {
-					available = g.ramCofigured - g.memGuard
-				}
-				g.lock.RUnlock()
-
-				if repo.failureCount >= 5 && len(g.repoQueue) > 1 {
-					continue
-				}
-
-				if (totalNextMemUsing <= available && free >= repo.memmoryRequired) || (g.beingClones == 0) {
-					fmt.Printf("totalNextMemUsing: %d, available: %d, free: %d, memmoryRequired: %d\n", totalNextMemUsing, available, free, repo.memmoryRequired)
-
-					g.lock.Lock()
-					g.totalMemoryConsuming += repo.memmoryRequired
-					g.beingClones += 1
-					g.lock.Unlock()
-
-					repo.freeMemmoryAtStart, _ = g.GetFreeUsage()
-
-					go func(repo *Repo) {
-						var err error
-						fmt.Printf("Start clone '%s' ...\n", repo.RepoUrl)
-						repo.RepoDirPath = fmt.Sprintf("%s/gitclone-%s", g.repoFolder, randStr(8))
-
-						cloningMap.Store(repo.RepoDirPath+"/"+repo.RepoName, repo.memmoryRequired)
-
-						if repo.cloneType == "blobless" {
-							err = g.doBloblessClone(repo, true)
-						} else {
-							err = g.doFullClone(repo)
-						}
-
-						cloningMap.Delete(repo.RepoDirPath + "/" + repo.RepoName)
-
-						g.lock.Lock()
-						g.totalMemoryConsuming -= repo.memmoryRequired
-						g.beingClones -= 1
-						if g.beingClones < 0 {
-							g.beingClones = 0
-						}
-						g.lock.Unlock()
-
-						if err != nil {
-							fmt.Printf("Failed to clone '%s', requeue!\n", repo.RepoUrl)
-							repo.failureCount++
-							repo.freeMemmoryAtFailed, _ = g.GetFreeUsage()
-
-							if repo.memmoryRequired < g.ramCofigured {
-								repo.memmoryRequired *= (2 << repo.failureCount)
-								fmt.Printf("----------------- memmoryRequired = %d\n", repo.memmoryRequired)
-
-								g.lock.Lock()
-								g.memGuard += repo.memmoryRequired
-								g.lock.Unlock()
-							}
-
-							g.queue <- repo
-						} else {
-							g.lock.Lock()
-							if g.memGuard >= repo.memmoryRequired {
-								g.memGuard -= repo.memmoryRequired
-							}
-							g.lock.Unlock()
-
-							repo.failureCount = 0
-							repo.memmoryRequired = g.minMemoryForEachClone
-							success <- 1
-							fmt.Printf("=== Clone '%s' successfully ===\n", repo.RepoUrl)
-						}
-					}(repo)
-					i++
-				}
-			}
-			g.repoQueue = g.repoQueue[i:]
+		case <-time.After(1 * time.Second):
+			// Try to schedule for every 1 second
+			g.scheduleToClone()
 		}
 	}
 }
 
-func (g *Git) GetFreeUsage() (uint64, uint64) {
-	bToMb := func(b uint64) uint64 {
-		return b / 1024 / 1024
-	}
-	memInfo, _ := mem.VirtualMemory()
-	if g.ramAtStart == 0 {
-		g.ramAtStart = memInfo.Used
-	}
-	used := uint64(0)
-	if memInfo.Used > g.ramAtStart {
-		used = bToMb(memInfo.Used - g.ramAtStart)
+func (g *Git) scheduleToClone() {
+	free, used := g.GetMemoryUsage()
+	clonings := g.CloningNum()
+
+	// Sort cloning queue by clone-time: youngest -> oldest
+	// At pressure time, stop the youngest cloning to save memory.
+	sort.Slice(g.repoClonings, func(i, j int) bool {
+		if g.repoClonings[i].cloneAt > g.repoClonings[j].cloneAt {
+			return true
+		}
+		return false
+	})
+
+	if used+g.protectionGuard > g.ramCofigured && len(g.repoClonings) >= 1 {
+		g.pressureTime = true
+		for _, r := range g.repoClonings {
+			if r.cloneStatus != STOPED && r.cmd != nil && r.cmd.Process != nil {
+				// Stop the youngest clonning to save memory for others
+				fmt.Printf("\n\n\n\n****** Stop cloning '%s/%s' because memory shortage ******\n\n\n\n", r.RepoDirPath, r.RepoName)
+				//id, err := syscall.Getpgid(r.cmd.Process.Pid)
+				//syscall.Kill(-r.cmd.Process.Pid, syscall.SIGKILL)
+				r.cmd.Process.Kill()
+				r.cloneStatus = STOPED
+				break
+			}
+		}
+	} else if used+int(float64(g.protectionGuard)*1.4) <= g.ramCofigured {
+		time.AfterFunc(time.Second*20, func() {
+			// Wait after 20 seconds, then turn of pressure time flag
+			g.pressureTimeChan <- false
+		})
 	}
 
-	// Used number only reflect the memory consumed by git clones,
-	// not for the whole memory that contiainer app is being used.
-	return g.ramCofigured - used, used
+	fmt.Printf("cloned success: %d, queue: %d, clonings: %d,  MemUsed=%d Mi/%d Mi, PressureTime: %v\n",
+		g.cloneSuccess, len(g.readyRepoQueue), clonings, used, g.ramCofigured, g.pressureTime)
+
+	// Print all repos that's clonning
+	fmt.Printf("%d Clones: [\n", clonings)
+	for _, r := range g.repoClonings {
+		if r.cloneStatus == STOPED {
+			fmt.Printf("\t%s/%s --> Require %v (MiB) (status: 'PENDING' - waiting for free mem... )\n", r.RepoDirPath, r.RepoName, r.memmoryRequired)
+		} else {
+			fmt.Printf("\t%s/%s --> Require %v (MiB) (status: %s)\n", r.RepoDirPath, r.RepoName, r.memmoryRequired, r.cloneStatus)
+		}
+	}
+	fmt.Printf("]\n")
+
+	// No more clonning if in pressure time
+	if len(g.readyRepoQueue) == 0 || g.pressureTime {
+		return
+	}
+
+	// Repo with small required-mem is higher priority to run fist
+	// Should be optimized with order queue.
+	sort.Slice(g.readyRepoQueue, func(i, j int) bool {
+		if g.readyRepoQueue[i].memmoryRequired < g.readyRepoQueue[j].memmoryRequired {
+			return true
+		}
+		return false
+	})
+
+	for i, repo := range g.readyRepoQueue {
+		totalNextMemUsing := 0
+
+		if clonings == 0 {
+			// If no repo is cloning, then make the best memory condition for this repo.
+			g.memGuard = 0
+			g.totalMemoryConsuming = 0
+			repo.memmoryRequired = repo.minMemmoryRequired
+		} else {
+			totalNextMemUsing = g.totalMemoryConsuming + repo.memmoryRequired
+		}
+
+		available := g.ramCofigured - g.memGuard
+
+		if repo.failureCount >= 20 {
+			fmt.Printf("Too many failures to clone repo %s/%s (require-mem: %d). Skip this!\n",
+				repo.RepoDirPath, repo.RepoName, repo.memmoryRequired)
+			g.readyRepoQueue = append(g.readyRepoQueue[0:i], g.readyRepoQueue[i+1:]...)
+			break
+		}
+
+		if (totalNextMemUsing <= available && free >= repo.memmoryRequired) || (clonings == 0) {
+			fmt.Printf("totalNextMemUsing: %d, available: %d, free: %d, memGuard: %d, memmoryRequired: %d\n",
+				totalNextMemUsing, available, free, g.memGuard, repo.memmoryRequired)
+
+			g.totalMemoryConsuming += repo.memmoryRequired
+			g.readyRepoQueue = append(g.readyRepoQueue[0:i], g.readyRepoQueue[i+1:]...)
+			go g.startClone(repo)
+			break // Do not remove this line
+		}
+	}
+}
+
+func (g *Git) startClone(repo *Repo) {
+	fmt.Printf("Start clone '%s' ...\n", repo.RepoUrl)
+
+	repo.cloneStatus = CLONING
+	repo.cloneAt = time.Now().Unix()
+	g.runningQueueChan <- repo
+
+	repo.RepoDirPath = fmt.Sprintf("%s/gitclone-%s", g.repoFolder, RandStr(8))
+	repo.err = nil
+	if repo.cloneType == "blobless" {
+		repo.err = g.doBloblessClone(repo, true)
+	} else {
+		repo.err = g.doFullClone(repo)
+	}
+
+	repo.cmd = nil
+	repo.cloneStatus = FINISHED
+	g.runningQueueChan <- repo
+}
+
+func (g *Git) cloneFinished(repo *Repo) {
+	// Clone finished, reduce total memory usage (just an estimation)
+	if g.totalMemoryConsuming >= repo.memmoryRequired {
+		g.totalMemoryConsuming -= repo.memmoryRequired
+	}
+
+	if repo.err != nil {
+		repo.failureCount += 1
+
+		if repo.memmoryRequired < g.ramCofigured {
+			if g.memGuard > repo.memmoryRequired {
+				g.memGuard -= repo.memmoryRequired
+			}
+			x := float64(repo.memmoryRequired) * 1.13
+			repo.memmoryRequired = int(x)
+			fmt.Printf("Next memmory-required for repo %s:  %d MiB.\n", repo.RepoName, repo.memmoryRequired)
+
+			g.memGuard += repo.memmoryRequired
+		}
+
+		fmt.Printf("Failed to clone '%s', requeue!\n", repo.RepoUrl)
+		g.readyQueueChan <- repo
+	} else {
+		if g.memGuard >= repo.memmoryRequired {
+			g.memGuard -= repo.memmoryRequired
+		}
+
+		repo.failureCount = 0
+		g.successChan <- 1
+		fmt.Printf("=== Clone '%s' successfully ===\n", repo.RepoUrl)
+	}
 }
 
 func (g *Git) FullClone(RepoUrl string) {
@@ -335,27 +388,18 @@ func (g *Git) FullClone(RepoUrl string) {
 		memmoryRequired:    g.minMemoryForEachClone,
 		minMemmoryRequired: g.minMemoryForEachClone,
 	}
-	g.queue <- &repo
+	g.readyQueueChan <- &repo
 }
 
 func (g *Git) BloblessClone(RepoUrl string) {
-	sizeMemMap := map[uint64][]uint64{
-		20:  {0, 100},
-		40:  {100, 300},
-		80:  {300, 500},
-		120: {500, 1024},
-		150: {1024, 2048},
-		250: {2048, 1024 * 4},
-		//90: {2048, 1024 * 4},
-	}
-	minMemoryForEachClone := uint64(200)
+	minMemoryForEachClone := 400
 
-	repoSize, rname := g.getRepoSize(RepoUrl)
+	repoSize, rname := g.GetRepoSize(RepoUrl)
 	if repoSize == 0 {
 		return
 	}
 	for s, r := range sizeMemMap {
-		if r[0] <= repoSize && repoSize < r[1] {
+		if r[0] <= repoSize && int(repoSize) < r[1] {
 			minMemoryForEachClone = s
 			break
 		}
@@ -368,13 +412,12 @@ func (g *Git) BloblessClone(RepoUrl string) {
 		memmoryRequired:    minMemoryForEachClone,
 		minMemmoryRequired: minMemoryForEachClone,
 	}
-
 	fmt.Printf("Queue to clone: %s, required-mem: %d\n", RepoUrl, minMemoryForEachClone)
-	g.queue <- &repo
+	g.readyQueueChan <- &repo
 }
 
 func (g *Git) doFullClone(repo *Repo) error {
-	repo.RepoDirPath = fmt.Sprintf("%s/%s", g.repoFolder, randStr(8))
+	repo.RepoDirPath = fmt.Sprintf("%s/%s", g.repoFolder, RandStr(8))
 	r, err := git.PlainOpen(repo.RepoDirPath)
 	if err != nil {
 		r, err = git.PlainClone(
@@ -411,33 +454,31 @@ func (g *Git) doFullClone(repo *Repo) error {
 }
 
 func (g *Git) doBloblessClone(repo *Repo, debug bool) error {
-	cmd := fmt.Sprintf("git clone --jobs=1 --filter=blob:none %s %s", repo.RepoUrl, repo.RepoDirPath)
-	//cmd := fmt.Sprintf("git clone --filter=tree:0 %s %s", repo.RepoUrl, repo.RepoDirPath)
-	fmt.Printf("Runing: %s\n", cmd)
+	//cloneCmd := fmt.Sprintf("git clone -j1 --filter=blob:none %s %s", repo.RepoUrl, repo.RepoDirPath)
+	cloneCmd := fmt.Sprintf("git clone -j3 --filter=blob:none %s %s", repo.RepoUrl, repo.RepoDirPath)
+	removeCmd := fmt.Sprintf("rm -rf %s", repo.RepoDirPath)
 
-	err, out, errout := shellRun(cmd)
+	//cmd := fmt.Sprintf("git clone --filter=tree:0 %s %s", repo.RepoUrl, repo.RepoDirPath)
+	fmt.Printf("Runing: %s\n", cloneCmd)
+
+	repo.cmd = nil
+	err := ShellRun(cloneCmd, func(c *exec.Cmd) {
+		repo.cmd = c
+	})
 	if err != nil {
+		fmt.Println(err)
+		repo.cmd = nil
+		ShellRun(removeCmd, nil)
 		return err
 	}
-	if debug {
-		if out != "" {
-			fmt.Println("--- stdout ---")
-			fmt.Println(out)
-		}
-		if errout != "" {
-			fmt.Println("--- stderr ---")
-			fmt.Println(errout)
-		}
-	}
-	_, err = repo.getRemoteBranches()
 
-	// Remove folder
-	cmd = fmt.Sprintf("rm -rf %s", repo.RepoDirPath)
-	shellRun(cmd)
-	return err
+	//_, err = repo.getRemoteBranches()
+
+	ShellRun(removeCmd, nil)
+	return nil
 }
 
-func (g *Git) getRepoSize(repoUrl string) (uint64, string) {
+func (g *Git) GetRepoSize(repoUrl string) (int, string) {
 	s := strings.Split(repoUrl, "github.com/")
 	if len(s) <= 1 {
 		return 0, ""
@@ -469,7 +510,54 @@ func (g *Git) getRepoSize(repoUrl string) (uint64, string) {
 		return 0, ""
 	}
 
-	size := uint64(j["size"].(float64) / 1024)
-	RepoSize[repoUrl] = size
-	return size, rname
+	size, ok := j["size"]
+	if !ok {
+		return 0, ""
+	}
+	ss := int(size.(float64) / 1024)
+	RepoSize[repoUrl] = ss
+	return ss, rname
+}
+
+func (g *Git) GetMemoryUsage() (int, int) {
+	if g.ramAtStart1 == 0 {
+		s, err := memory.Get()
+		if err != nil {
+			fmt.Println(err)
+		} else {
+			g.ramAtStart1 = s.Used
+		}
+	}
+
+	if g.ramAtStart2 == 0 {
+		memInfo, _ := mem.VirtualMemory()
+		g.ramAtStart2 = memInfo.Used
+	}
+
+	used := 0
+	s, _ := memory.Get()
+	if s.Used > g.ramAtStart1 {
+		used = int(BToMb(s.Used - g.ramAtStart1))
+	}
+
+	if true {
+		_used := 0
+		memInfo, _ := mem.VirtualMemory()
+		if memInfo.Used > g.ramAtStart2 {
+			_used = int(BToMb(memInfo.Used - g.ramAtStart2))
+		}
+		fmt.Printf("[*******************] Used1: %d, Used2: %d\n", used, _used)
+	}
+
+	if used == 0 {
+		memInfo, _ := mem.VirtualMemory()
+		if memInfo.Used > g.ramAtStart2 {
+			used = int(BToMb(memInfo.Used - g.ramAtStart2))
+		}
+		fmt.Printf("[*********] memInfo.Used: %d, g.ramAtStart2: %d, Used: %d\n", BToMb(memInfo.Used), BToMb(g.ramAtStart2), used)
+	}
+
+	// Used number only reflect the memory consumed by git clones,
+	// not for the whole memory that contiainer app is being used.
+	return int(g.ramCofigured - used), int(used)
 }
