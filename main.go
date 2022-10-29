@@ -9,6 +9,8 @@ import (
 
 func main() {
 	fmt.Println("Start git test")
+	
+	fmt.Println("test 1") 
 
 	bigRepos := []string{
 		"https://github.com/torvalds/linux.git",
