@@ -127,6 +127,9 @@ func main() {
 			time.Sleep(10 * time.Second)
 		}
 	}()
+	
+	x := 1 
+	fmt.Println("x = ", x) 
 
 	var wg sync.WaitGroup
 	wg.Add(1)
